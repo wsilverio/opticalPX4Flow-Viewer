@@ -43,6 +43,8 @@ void Quit_Handler(int sig){
 
 int main(int argc, char const *argv[])
 {
+    exit(1);
+
     system("clear");
 
     char *uart_name = (char*)"/dev/ttyACM0";
@@ -60,126 +62,156 @@ int main(int argc, char const *argv[])
 
     signal(SIGINT, Quit_Handler);
 
-    #define ACCUM_POS "Accumulated Position"
-    cv::namedWindow(ACCUM_POS, CV_WINDOW_AUTOSIZE);
+    #define CURRENT_POS "PX4FLOW"
+    cv::namedWindow(CURRENT_POS, CV_WINDOW_AUTOSIZE);
 
-    #define CURRENT_POS "Current Position"
-    cv::namedWindow(CURRENT_POS, CV_WINDOW_AUTOSIZE);    
+    #define IMAGE_DATA "Image"
+    cv::namedWindow(IMAGE_DATA, CV_WINDOW_AUTOSIZE);    
 
     serial_port.start();
     px4flow.start();
 
-    float flow_x, flow_y, flow_comp_m_x, flow_comp_m_y, ground_distance;
+    float   flow_x, flow_y, 
+            flow_comp_m_x, flow_comp_m_y,
+            integrated_xgyro, integrated_ygyro, integrated_zgyro,
+            ground_distance;
+
     uint64_t time_usec, time_usec_prev = 0;
-    
     double delta_time, X_accum = 0, Y_accum = 0;
+    uint8_t quality;
 
     cv::Scalar bgColor(66, 59, 55);
     cv::Scalar fillColor(242, 242, 242);
 
-    cv::Mat accumPosImg = cv::Mat(cv::Size(600, 600), CV_8UC3, bgColor);
+    char *frase[3] = {"accumulated position", "flow vector (dezi-pixels)", "ground distance (m)"};
+    std::vector<cv::Rect> rects(3);
 
     #define HEIGHT 300
     #define MARGEM 30
     #define TAM (HEIGHT - 2*MARGEM)
-    cv::Mat currentPosImg = cv::Mat(cv::Size(4*MARGEM + 3*TAM, HEIGHT), CV_8UC3, bgColor);
+    #define WIDTH 4*MARGEM + 3*TAM
 
-    char *frase[3] = {"current position", "flow vector", "ground distance"};
-    std::vector<cv::Rect> rects(3);
-
-    for (int i = 0; i < rects.size(); ++i){
+    for (int i = 0; i < rects.size(); ++i)
         rects[i] = cv::Rect((i+1)*MARGEM + i*TAM - 1, MARGEM - 1, TAM, TAM);
-        cv::rectangle(currentPosImg, rects[i], fillColor, 1, 8, 0);
-        putText(currentPosImg, frase[i], cv::Point(rects[i].x, HEIGHT - MARGEM/2.0), cv::FONT_HERSHEY_SIMPLEX, 0.4, fillColor, 1, CV_AA);
-    }
+
+    cv::Mat currentPosImg = cv::Mat(cv::Size(WIDTH, HEIGHT), CV_8UC3, bgColor);
+
+    #define POS_VECTOR_SIZE 100
+    std::vector<cv::Point2f> accPosVector;
+
+    enum RECT_NAME{
+        AP, // accumulated_position
+        FV, // flow_vector
+        GD  // ground_distance
+    };
+
+    time_usec_prev = get_time_usec();
 
     while(1){
 
-        time_usec = px4flow.current_messages.time_stamps.optical_flow_rad;
-
-        flow_x = px4flow.current_messages.optical_flow.flow_x;
-        flow_y = px4flow.current_messages.optical_flow.flow_y;
-        flow_comp_m_x = px4flow.current_messages.optical_flow.flow_comp_m_x;
-        flow_comp_m_y = px4flow.current_messages.optical_flow.flow_comp_m_y;
-        ground_distance = px4flow.current_messages.optical_flow.ground_distance;
-
-        // printf( 
-        //         "time_usec: %lu\n"
-        //         "flow_x: %f\n"
-        //         "flow_y: %f\n"
-        //         "flow_comp_m_x: %f\n"
-        //         "flow_comp_m_y: %f\n"
-        //         "ground_distance: %f\n\n",
-        //         time_usec,
-        //         flow_x,
-        //         flow_y,
-        //         flow_comp_m_x,
-        //         flow_comp_m_y,
-        //         ground_distance
-        //         );
+        // // atualiza os dados
+        // time_usec = px4flow.current_messages.time_stamps.optical_flow_rad;
+        // flow_x = px4flow.current_messages.optical_flow.flow_x;
+        // flow_y = px4flow.current_messages.optical_flow.flow_y;
+        // flow_comp_m_x = px4flow.current_messages.optical_flow.flow_comp_m_x;
+        // flow_comp_m_y = px4flow.current_messages.optical_flow.flow_comp_m_y;
+        // ground_distance = px4flow.current_messages.optical_flow.ground_distance;
 
 
-        if(time_usec_prev == time_usec) continue;
+        // // if(time_usec_prev == time_usec) continue;
+
+        // delta_time = (time_usec - time_usec_prev) / 1e6;
+        // // printf("delta_time: %f\n", delta_time);
+
+        // if(delta_time < 0.1){ // aguarda uma fração de segundo
+        //     X_accum += flow_comp_m_x * delta_time;
+        //     Y_accum += flow_comp_m_y * delta_time;
+        // } 
+
+        // time_usec_prev = time_usec;
+
+        time_usec = get_time_usec();
+        flow_x = px4flow.current_messages.optical_flow_rad.integrated_x;
+        flow_y = px4flow.current_messages.optical_flow_rad.integrated_y;
+        integrated_xgyro = px4flow.current_messages.optical_flow_rad.integrated_xgyro;
+        integrated_ygyro = px4flow.current_messages.optical_flow_rad.integrated_ygyro;
+        integrated_zgyro = px4flow.current_messages.optical_flow_rad.integrated_zgyro;
+        ground_distance = px4flow.current_messages.optical_flow_rad.distance;
+        quality = px4flow.current_messages.optical_flow_rad.quality;
 
         delta_time = (time_usec - time_usec_prev) / 1e6;
-        // printf("delta_time: %f\n", delta_time);
 
-        if(delta_time < 0.1){
-            X_accum += flow_comp_m_x * delta_time;
-            Y_accum += flow_comp_m_y * delta_time;
-        } 
+        if(delta_time > 0.1)
+        {
 
-        time_usec_prev = time_usec;
+            float pixel_x = flow_x + integrated_xgyro;
+            float pixel_y = flow_y + integrated_ygyro;
 
-        // printf(
-        //     "x pos: %f\n"
-        //     "y pos: %f\n\n",
-        //     X_accum, Y_accum);
+            float velocity_x = pixel_x * ground_distance / delta_time;
+            float velocity_y = pixel_y * ground_distance / delta_time;
 
-        cv::Point2f pos(
-            Map( Constrain(X_accum,-5,5), -5, 5, 0, accumPosImg.cols),
-            Map( Constrain(Y_accum,-5,5), -5, 5, 0, accumPosImg.rows)
-            );
+            X_accum += velocity_x * 100;
+            Y_accum += velocity_y * 100;
 
-        cv::circle(accumPosImg, pos, 1, fillColor, -1, CV_AA, 0);
+            // reseta a imagem
+            currentPosImg = cv::Mat(cv::Size(WIDTH, HEIGHT), CV_8UC3, bgColor);
 
-        currentPosImg = cv::Mat(cv::Size(4*MARGEM + 3*TAM, HEIGHT), CV_8UC3, bgColor);
-        for (int i = 0; i < rects.size(); ++i){
-            cv::rectangle(currentPosImg, rects[i], fillColor, 1, 8, 0);
-            putText(currentPosImg, frase[i], cv::Point(rects[i].x, HEIGHT - MARGEM/2.0), cv::FONT_HERSHEY_SIMPLEX, 0.4, fillColor, 1, CV_AA);
-        }
+            // reescreve os retângulos e seus rótulos
+            for (int i = 0; i < rects.size(); ++i){
+                cv::rectangle(currentPosImg, rects[i], fillColor, 1, 8, 0);
+                putText(currentPosImg, frase[i], cv::Point(rects[i].x, HEIGHT - MARGEM/2.0), cv::FONT_HERSHEY_SIMPLEX, 0.4, fillColor, 1, CV_AA);
+            }
 
-        pos = cv::Point(
-                Map( pos.x, 0, accumPosImg.cols, rects[0].x, rects[0].x + TAM),
-                Map( pos.y, 0, accumPosImg.rows, rects[0].y, rects[0].y + TAM)
-                );
+            // atualiza o buffer de posição
+            accPosVector.push_back(cv::Point2f( Map( Constrain(X_accum,-5,5), -5, 5, 0, TAM) + rects[AP].x + TAM/2,
+                                                Map( Constrain(Y_accum,-5,5), -5, 5, 0, TAM) + rects[AP].y + TAM/2));
 
-        cv::circle( currentPosImg,
-                    cv::Point(  Constrain(pos.x, rects[0].x + 4, rects[0].x + TAM - 4),
-                                Constrain(pos.y, rects[0].y + 4, rects[0].y + TAM - 4)),
-                    3, fillColor, 1, CV_AA, 0);
+            // limita sua posição na tela
+            accPosVector.back() = cv::Point(Constrain(accPosVector.back().x, rects[AP].x + 4, rects[AP].x + TAM - 4),
+                                            Constrain(accPosVector.back().y, rects[AP].y + 4, rects[AP].y + TAM - 4));
 
-        #define SCALE 0.25
-        cv::Point2f center(rects[1].x + TAM/2.0, rects[1].y + TAM/2.0);
-        cv::line(currentPosImg, center, center - cv::Point2f(flow_x * SCALE, flow_y * SCALE), fillColor, 1, CV_AA, 0);
-        cv::line(currentPosImg, center, center - cv::Point2f(flow_x * SCALE, 0), cv::Scalar(52, 41, 166), 1, CV_AA, 0);
-        cv::line(currentPosImg, center, center - cv::Point2f(0, flow_y * SCALE), cv::Scalar(78, 104, 18), 1, CV_AA, 0);
+            // limita o tamanho do buffer
+            if(accPosVector.size() > POS_VECTOR_SIZE)
+                accPosVector.erase(accPosVector.begin());
 
-        #define GND_DIST_MAX 5
-        float distConstr = Constrain( Map(ground_distance, 0, GND_DIST_MAX, 0, TAM), 0, TAM);
-        cv::rectangle(currentPosImg, cv::Rect(rects[2].x + TAM/3.0, rects[2].y + TAM - distConstr, TAM/3.0, distConstr), fillColor, -1, 8, 0);
+            // desenha o buffer de posição
+            cv::circle( currentPosImg, accPosVector.back(), 3, fillColor, 1, CV_AA, 0);
+            if (accPosVector.size() > 1){
+                for (int i = 1; i < accPosVector.size(); ++i)
+                    line(currentPosImg, accPosVector[i], accPosVector[i-1], fillColor, 1, CV_AA, 0);
+            }
 
-        // do{
+            // const cv::Point *pts = (const cv::Point*) cv::Mat(accPosVector).data;
+            // int npts = accPosVector.size();
+            // polylines(currentPosImg, &pts, &npts, 1, true, fillColor, 1, CV_AA, 0);
+
+            // desenha o vetor do optical flow
+            #define SCALE 0.25
+            cv::Point2f center(rects[FV].x + TAM/2.0, rects[FV].y + TAM/2.0);
+            cv::line(currentPosImg, center, center - cv::Point2f(flow_x * SCALE, flow_y * SCALE), fillColor, 1, CV_AA, 0);
+            cv::line(currentPosImg, center, center - cv::Point2f(flow_x * SCALE, 0), cv::Scalar(52, 41, 166), 1, CV_AA, 0);
+            cv::line(currentPosImg, center, center - cv::Point2f(0, flow_y * SCALE), cv::Scalar(78, 104, 18), 1, CV_AA, 0);
+
+            // desenha a barra de distância
+            #define GND_DIST_MAX 5
+            float distConstr = Constrain( Map(ground_distance, 0, GND_DIST_MAX, 0, TAM), 0.3/5.0*TAM, TAM);
+            cv::rectangle(currentPosImg, cv::Rect(rects[GD].x + TAM/3.0, rects[FV].y + TAM - distConstr, TAM/3.0, distConstr), fillColor, -1, 8, 0);
+
             char c = (char) cvWaitKey(1); // 1ms
             if(c == 27) Quit_Handler(c); // ESC key
 
-        // }while(not px4flow.img.rows && not px4flow.img.cols);
+            if(px4flow.img.rows && px4flow.img.cols){
+                cv::Mat imagePlot;
+                px4flow.img.copyTo(imagePlot);
+                cv::imshow(IMAGE_DATA, imagePlot);        
+            }
+            
+            time_usec_prev = time_usec;
+        }
 
-        // px4flow.img.copyTo(imagePlot);
-
-        // // Exibe a imagem
-        cv::imshow(ACCUM_POS, accumPosImg);
+        // Exibe a imagem
         cv::imshow(CURRENT_POS, currentPosImg);
+
     }
 
     return 0;
