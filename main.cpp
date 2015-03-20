@@ -71,7 +71,7 @@ int main(int argc, char const *argv[])
     serial_port.start();
     px4flow.start();
 
-    const char *frase[3] = {"accumulated position", "flow vector (dezi-pixels)", "ground distance (m)"};
+    const char *frase[3] = {"accumulated position (m x m)", "speed (m/s)", "ground distance LP (m)"};
     std::vector<cv::Rect> rects(3);
 
     #define HEIGHT 300
@@ -88,62 +88,127 @@ int main(int argc, char const *argv[])
     cv::Mat imagePlot;
     cv::Mat currentPosImg = cv::Mat(cv::Size(WIDTH, HEIGHT), CV_8UC3, bgColor);
 
-    #define POS_VECTOR_SIZE 20
-    std::vector<cv::Point2f> accPosVector;
-
     enum RECT_NAME{
-        AP, // accumulated_position
-        FV, // flow_vector
-        GD  // ground_distance
+        AP,     // accumulated_position
+        VEL,    // vel vector
+        GD      // ground_distance
     };
 
-    float delta_time_sec; // [s]
-    float ground_distance_lp = 0; // [m]
-    uint64_t time_usec_prev = 0; // [us]
+    float delta_time_sec;           // [s]
+    float ground_distance_lp = 0;   // [m]
+    uint64_t time_usec_prev = 0;    // [us]
     float X_accum = 0, Y_accum = 0; // [m]
+    float vel_x = 0, vel_y = 0;
+
+    #define GND_DIST_MAX 5      // [m]
+    #define GND_DIST_MIN 0.3    // [m]
+    #define POS_X_MIN -2.5      // [m]
+    #define POS_X_MAX +2.5      // [m]
+    #define POS_Y_MIN -2.5      // [m]
+    #define POS_Y_MAX +2.5      // [m]
+    #define VEL_SCALE 50        // apenas para visualização
+    #define QUALITY_MIN 100
+    #define DT_S_MIN 0.1        // delta time in [s]
+
+    #define POS_VECTOR_SIZE 20
+    std::vector<cv::Point2f> accPosVector;
+    accPosVector.push_back(cv::Point2f( Map( Constrain(X_accum,POS_X_MIN,POS_X_MAX), POS_X_MIN, POS_X_MAX, 0, TAM) + rects[AP].x,
+                                                    Map( Constrain(Y_accum,POS_Y_MIN,POS_Y_MAX), POS_Y_MAX, POS_Y_MIN, 0, TAM) + rects[AP].y));
+    // limita sua posição na tela
+    accPosVector.back() = cv::Point(Constrain(accPosVector.back().x, rects[AP].x + 4, rects[AP].x + TAM - 4),
+                                    Constrain(accPosVector.back().y, rects[AP].y + 4, rects[AP].y + TAM - 4));
 
     while(1){
 
-        uint64_t time_usec_now = px4flow.current_messages.optical_flow.time_usec;
-        uint8_t quality = px4flow.current_messages.optical_flow.quality;
-        
-        float flow_x = px4flow.current_messages.optical_flow.flow_x;
-        float flow_y = px4flow.current_messages.optical_flow.flow_y;
+        // optical flow fields #100
+        // uint64_t time_usec = px4flow.current_messages.time_stamps.optical_flow;
+        // // uint64_t time_usec = px4flow.current_messages.optical_flow.time_usec;
+        // float flow_comp_m_x = px4flow.current_messages.optical_flow.flow_comp_m_x;
+        // float flow_comp_m_y = px4flow.current_messages.optical_flow.flow_comp_m_y;
+        // float distance = px4flow.current_messages.optical_flow.ground_distance;
+        // int16_t flow_x = px4flow.current_messages.optical_flow.flow_x;
+        // int16_t flow_y = px4flow.current_messages.optical_flow.flow_y;
+        // // uint8_t sensor_id = px4flow.current_messages.optical_flow.sensor_id;
+        // uint8_t quality = px4flow.current_messages.optical_flow.quality;
 
-        float flow_comp_m_x = px4flow.current_messages.optical_flow.flow_comp_m_x;
-        float flow_comp_m_y = px4flow.current_messages.optical_flow.flow_comp_m_y;
+        // optical flow rad fields #106
+        uint64_t time_usec = px4flow.current_messages.optical_flow_rad.time_usec;
+        uint64_t time_stamps = px4flow.current_messages.time_stamps.optical_flow_rad;
+        uint32_t integration_time_us = px4flow.current_messages.optical_flow_rad.integration_time_us;
+        float integrated_x = px4flow.current_messages.optical_flow_rad.integrated_x;
+        float integrated_y = px4flow.current_messages.optical_flow_rad.integrated_y;
+        float integrated_xgyro = px4flow.current_messages.optical_flow_rad.integrated_xgyro;
+        float integrated_ygyro = px4flow.current_messages.optical_flow_rad.integrated_ygyro;
+        // float integrated_zgyro = px4flow.current_messages.optical_flow_rad.integrated_zgyro;
+        // uint32_t time_delta_distance_us = px4flow.current_messages.optical_flow_rad.time_delta_distance_us;
+        float distance = px4flow.current_messages.optical_flow_rad.distance;
+        // int16_t temperature = px4flow.current_messages.optical_flow_rad.temperature;
+        // uint8_t sensor_id = px4flow.current_messages.optical_flow_rad.sensor_id;
+        uint8_t quality = px4flow.current_messages.optical_flow_rad.quality;
 
-        float ground_distance_now = px4flow.current_messages.optical_flow.ground_distance;
-
-        // ignora a primeira msg ou se a dist. for inferior a 30 cm
+        // ignora a primeira msg
         if (time_usec_prev == 0){
-            time_usec_prev = time_usec_now;
+            time_usec_prev = time_usec;
             continue;
         }
 
         // calcula o intervalo de tempo
-        delta_time_sec = (time_usec_now - time_usec_prev) / 1e6f;
+        delta_time_sec = (time_usec - time_usec_prev) / 1e6f; // [s]
 
-        if(delta_time_sec > 0.1) // 100 ms
+        if(delta_time_sec > DT_S_MIN) // 100 ms
         {
-            time_usec_prev = time_usec_now;
+            time_usec_prev = time_usec;
 
-            if (ground_distance_now > 0.3 && quality >= 100){
+            if (distance > GND_DIST_MIN && quality >= QUALITY_MIN){
 
-                ground_distance_lp = 0.10f * ground_distance_now + 0.90f * ground_distance_lp;
+                ground_distance_lp = 0.10f * distance + 0.90f * ground_distance_lp;
 
-                // X_accum += 0;
-                // Y_accum += 0;
+                // #106 optical flow rad
+
+                // float flow_x = integrated_x - integrated_xgyro; // [rad]
+                // float flow_y = integrated_y - integrated_ygyro; // [rad]
+
+                // vel_x = flow_x * ground_distance_lp / (integration_time_us / 1e6f);
+                // vel_y = flow_y * ground_distance_lp / (integration_time_us / 1e6f);
+
+                // X_accum += vel_x * (integration_time_us / 1e6f);
+                // Y_accum += vel_y * (integration_time_us / 1e6f);
+
+                // printf(
+                //     "flow x:\t\t%f\n"
+                //     "flow y:\t\t%f\n"
+                //     "vel x:\t\t%f\n"
+                //     "vel y:\t\t%f\n"
+                //     "X_accum:\t%f\n"
+                //     "Y_accum:\t%f\n"
+                //     "distance:\t%f\n"
+                //     "distance LP:\t%f\n\n"
+                //     , flow_x*180.0/3.1415, flow_y*180.0/3.1415, vel_x, vel_y, X_accum, Y_accum, distance, ground_distance_lp);
+
+                // atualiza o buffer de posição
+                accPosVector.push_back(cv::Point2f( Map( Constrain(X_accum,POS_X_MIN,POS_X_MAX), POS_X_MIN, POS_X_MAX, 0, TAM) + rects[AP].x,
+                                                    Map( Constrain(Y_accum,POS_Y_MIN,POS_Y_MAX), POS_Y_MAX, POS_Y_MIN, 0, TAM) + rects[AP].y));
+
+                // limita sua posição na tela
+                accPosVector.back() = cv::Point(Constrain(accPosVector.back().x, rects[AP].x + 4, rects[AP].x + TAM - 4),
+                                                Constrain(accPosVector.back().y, rects[AP].y + 4, rects[AP].y + TAM - 4));
+
+                // limita o tamanho do buffer
+                if(accPosVector.size() > POS_VECTOR_SIZE)
+                    accPosVector.erase(accPosVector.begin());
+
             }
 
             // reseta a imagem
             currentPosImg = cv::Mat(cv::Size(WIDTH, HEIGHT), CV_8UC3, bgColor);
 
-            // reescreve os retângulos e seus rótulos
+            // redesenha os retângulos e seus rótulos
             for (int i = 0; i < rects.size(); ++i){
                 cv::rectangle(currentPosImg, rects[i], fillColor, 1, 8, 0);
                 putText(currentPosImg, frase[i], cv::Point(rects[i].x, HEIGHT - MARGEM/2.0), cv::FONT_HERSHEY_SIMPLEX, 0.4, fillColor, 1, CV_AA);
             }
+
+            // marcadores
             for(int i = 0; i < 10; ++i){
                 line(currentPosImg,
                     cv::Point(rects[0].x + i*TAM/10.0, rects[0].y + ((i==5)?-5:0)),
@@ -166,18 +231,6 @@ int main(int argc, char const *argv[])
                     fillColor, 0.4, CV_AA, 0);
             }
 
-            // atualiza o buffer de posição
-            accPosVector.push_back(cv::Point2f( Map( Constrain(X_accum,-5,5), -5, 5, 0, TAM) + rects[AP].x,
-                                                Map( Constrain(Y_accum,-5,5), 5, -5, 0, TAM) + rects[AP].y));
-
-            // limita sua posição na tela
-            accPosVector.back() = cv::Point(Constrain(accPosVector.back().x, rects[AP].x + 4, rects[AP].x + TAM - 4),
-                                            Constrain(accPosVector.back().y, rects[AP].y + 4, rects[AP].y + TAM - 4));
-
-            // limita o tamanho do buffer
-            if(accPosVector.size() > POS_VECTOR_SIZE)
-                accPosVector.erase(accPosVector.begin());
-
             // desenha o buffer de posição
             cv::circle( currentPosImg, accPosVector.back(), 3, fillColor, 1, CV_AA, 0);
            if (accPosVector.size() > 1){
@@ -190,28 +243,26 @@ int main(int argc, char const *argv[])
             // polylines(currentPosImg, &pts, &npts, 1, true, fillColor, 1, CV_AA, 0);
 
             // desenha o vetor do optical flow
-            #define SCALE 0.5
-            cv::Point2f center(rects[FV].x + TAM/2.0, rects[FV].y + TAM/2.0);
+            cv::Point2f center(rects[VEL].x + TAM/2.0, rects[VEL].y + TAM/2.0);
 
             cv::line(currentPosImg, center, center - cv::Point2f( 
-                Constrain(px4flow.current_messages.optical_flow.flow_x * SCALE,-TAM/2.0,TAM/2.0),
-                Constrain(px4flow.current_messages.optical_flow.flow_y * SCALE,-TAM/2.0,TAM/2.0)),
+                Constrain(vel_x * VEL_SCALE,-TAM/2.0,TAM/2.0),
+                Constrain(vel_y * VEL_SCALE,-TAM/2.0,TAM/2.0)),
                 fillColor, 1, CV_AA, 0);
 
             cv::line(currentPosImg, center, center - cv::Point2f(
-                Constrain(px4flow.current_messages.optical_flow.flow_x * SCALE,-TAM/2.0,TAM/2.0),
+                Constrain(vel_x * VEL_SCALE,-TAM/2.0,TAM/2.0),
                 0),
                 cv::Scalar(52, 41, 166), 1, CV_AA, 0);
 
             cv::line(currentPosImg, center, center - cv::Point2f(
                 0,
-                Constrain(px4flow.current_messages.optical_flow.flow_y * SCALE,-TAM/2.0,TAM/2.0)),
+                Constrain(vel_y * VEL_SCALE,-TAM/2.0,TAM/2.0)),
                 cv::Scalar(78, 104, 18), 1, CV_AA, 0);
 
             // desenha a barra de distância
-            #define GND_DIST_MAX 5
-            float distConstr = Constrain( Map(ground_distance_lp, 0, GND_DIST_MAX, 0, TAM), 0.3/5.0*TAM, TAM);
-            cv::Rect rect_GD = cv::Rect(rects[GD].x + TAM/3.0, rects[FV].y + TAM - distConstr, TAM/3.0, distConstr);
+            float distConstr = Constrain( Map(ground_distance_lp, 0, GND_DIST_MAX, 0, TAM), GND_DIST_MIN/GND_DIST_MAX*TAM, TAM);
+            cv::Rect rect_GD = cv::Rect(rects[GD].x + TAM/3.0, rects[VEL].y + TAM - distConstr, TAM/3.0, distConstr);
             cv::rectangle(currentPosImg, rect_GD, fillColor, -1, 8, 0);
 
             std::string text_GD = std::to_string(ground_distance_lp);
@@ -230,6 +281,13 @@ int main(int argc, char const *argv[])
 
         char c = (char) cvWaitKey(1); // 1 ms
         if(c == 27) Quit_Handler(c); // ESC key
+        if(c == 'r' || c == 'R'){
+            // reset -> center position
+            accPosVector.clear();
+            X_accum = Y_accum = 0;
+            accPosVector.push_back(cv::Point2f( Map( Constrain(X_accum,POS_X_MIN,POS_X_MAX), POS_X_MIN, POS_X_MAX, 0, TAM) + rects[AP].x,
+                                                Map( Constrain(Y_accum,POS_Y_MIN,POS_Y_MAX), POS_Y_MAX, POS_Y_MIN, 0, TAM) + rects[AP].y));
+        }
 
     }
 
