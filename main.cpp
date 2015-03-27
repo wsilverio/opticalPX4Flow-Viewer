@@ -71,7 +71,7 @@ int main(int argc, char const *argv[])
     serial_port.start();
     px4flow.start();
 
-    const char *frase[3] = {"accumulated position (m x m)", "speed (m/s)", "ground distance LP (m)"};
+    const char *frase[3] = {"accumulated position (m, m)", "speed (m/s)", "ground distance LP (m)"};
     std::vector<cv::Rect> rects(3);
 
     #define HEIGHT 300
@@ -94,18 +94,19 @@ int main(int argc, char const *argv[])
         GD      // ground_distance
     };
 
-    float delta_time_sec;           // [s]
-    float ground_distance_lp = 0;   // [m]
-    uint64_t time_usec_prev = 0;    // [us]
-    float X_accum = 0, Y_accum = 0; // [m]
-    float vel_x = 0, vel_y = 0;
+    uint64_t time_usec_prev = 0;    // [us]  -> timestamp (desde o boot da PX4Flow) (usado no cálculo do delta_time_sec)
+    float delta_time_sec;           // [s]   -> intervalo de tempo dentre os loops (usado no cálc da posição)
+    float ground_distance_lp = 0;   // [m]   -> distância do solo com filtro passa baixa (LP) (usada no cálc da posição)
+    float X_accum = 0, Y_accum = 0; // [m]   -> posição (x,y) acumulada
+    float vel_x = 0, vel_y = 0;     // [m/s] -> vetores de velocidade
+    // float teta_ang = 0;             // [rad] -> compensação angular (usado na exibição dos dados)
 
     #define GND_DIST_MAX 5      // [m]
     #define GND_DIST_MIN 0.3    // [m]
-    #define POS_X_MIN -2.5      // [m]
-    #define POS_X_MAX +2.5      // [m]
-    #define POS_Y_MIN -2.5      // [m]
-    #define POS_Y_MAX +2.5      // [m]
+    #define POS_X_MIN -5.0      // [m]
+    #define POS_X_MAX +5.0      // [m]
+    #define POS_Y_MIN -5.0      // [m]
+    #define POS_Y_MAX +5.0      // [m]
     #define VEL_SCALE 50        // apenas para visualização
     #define QUALITY_MIN 100
     #define DT_S_MIN 0.1        // delta time in [s]
@@ -125,7 +126,7 @@ int main(int argc, char const *argv[])
         // // uint64_t time_usec = px4flow.current_messages.optical_flow.time_usec;
         // float flow_comp_m_x = px4flow.current_messages.optical_flow.flow_comp_m_x;
         // float flow_comp_m_y = px4flow.current_messages.optical_flow.flow_comp_m_y;
-        // float distance = px4flow.current_messages.optical_flow.ground_distance;
+        float distance = px4flow.current_messages.optical_flow.ground_distance;
         // int16_t flow_x = px4flow.current_messages.optical_flow.flow_x;
         // int16_t flow_y = px4flow.current_messages.optical_flow.flow_y;
         // // uint8_t sensor_id = px4flow.current_messages.optical_flow.sensor_id;
@@ -133,7 +134,7 @@ int main(int argc, char const *argv[])
 
         // optical flow rad fields #106
         uint64_t time_usec = px4flow.current_messages.optical_flow_rad.time_usec;
-        uint64_t time_stamps = px4flow.current_messages.time_stamps.optical_flow_rad;
+        // uint64_t time_stamps = px4flow.current_messages.time_stamps.optical_flow_rad;
         uint32_t integration_time_us = px4flow.current_messages.optical_flow_rad.integration_time_us;
         float integrated_x = px4flow.current_messages.optical_flow_rad.integrated_x;
         float integrated_y = px4flow.current_messages.optical_flow_rad.integrated_y;
@@ -141,7 +142,7 @@ int main(int argc, char const *argv[])
         float integrated_ygyro = px4flow.current_messages.optical_flow_rad.integrated_ygyro;
         // float integrated_zgyro = px4flow.current_messages.optical_flow_rad.integrated_zgyro;
         // uint32_t time_delta_distance_us = px4flow.current_messages.optical_flow_rad.time_delta_distance_us;
-        float distance = px4flow.current_messages.optical_flow_rad.distance;
+        // float distance = px4flow.current_messages.optical_flow_rad.distance;
         // int16_t temperature = px4flow.current_messages.optical_flow_rad.temperature;
         // uint8_t sensor_id = px4flow.current_messages.optical_flow_rad.sensor_id;
         uint8_t quality = px4flow.current_messages.optical_flow_rad.quality;
@@ -163,27 +164,24 @@ int main(int argc, char const *argv[])
 
                 ground_distance_lp = 0.10f * distance + 0.90f * ground_distance_lp;
 
-                // #106 optical flow rad
-
-                // float flow_x = integrated_x - integrated_xgyro; // [rad]
-                // float flow_y = integrated_y - integrated_ygyro; // [rad]
-
-                // vel_x = flow_x * ground_distance_lp / (integration_time_us / 1e6f);
-                // vel_y = flow_y * ground_distance_lp / (integration_time_us / 1e6f);
-
-                // X_accum += vel_x * (integration_time_us / 1e6f);
-                // Y_accum += vel_y * (integration_time_us / 1e6f);
+                float flow_x = -integrated_y - integrated_xgyro;
+                float flow_y = -integrated_x - integrated_ygyro;
+                vel_x = flow_x * ground_distance_lp / (float)(integration_time_us / 1e6f);
+                vel_y = flow_y * ground_distance_lp / (float)(integration_time_us / 1e6f);
+                X_accum += vel_x * delta_time_sec;
+                Y_accum += vel_y * delta_time_sec;
 
                 // printf(
-                //     "flow x:\t\t%f\n"
-                //     "flow y:\t\t%f\n"
-                //     "vel x:\t\t%f\n"
-                //     "vel y:\t\t%f\n"
-                //     "X_accum:\t%f\n"
-                //     "Y_accum:\t%f\n"
-                //     "distance:\t%f\n"
-                //     "distance LP:\t%f\n\n"
-                //     , flow_x*180.0/3.1415, flow_y*180.0/3.1415, vel_x, vel_y, X_accum, Y_accum, distance, ground_distance_lp);
+                //     "flow x:\t\t\t%f\n"
+                //     "flow y:\t\t\t%f\n"
+                //     "vel x:\t\t\t%f\n"
+                //     "vel y:\t\t\t%f\n"
+                //     "X_accum:\t\t%f\n"
+                //     "Y_accum:\t\t%f\n"
+                //     "distance:\t\t%f\n"
+                //     "distance LP:\t\t%f\n"
+                //     "integration_time_sec:\t%f\n"
+                //     "\n", flow_x, flow_y, vel_x, vel_y, X_accum, Y_accum, distance, ground_distance_lp, (float)integration_time_us/1e6f);
 
                 // atualiza o buffer de posição
                 accPosVector.push_back(cv::Point2f( Map( Constrain(X_accum,POS_X_MIN,POS_X_MAX), POS_X_MIN, POS_X_MAX, 0, TAM) + rects[AP].x,
@@ -280,8 +278,11 @@ int main(int argc, char const *argv[])
         cv::imshow(CURRENT_POS, currentPosImg);
 
         char c = (char) cvWaitKey(1); // 1 ms
-        if(c == 27) Quit_Handler(c); // ESC key
-        if(c == 'r' || c == 'R'){
+        if(c == 27){
+            Quit_Handler(c); // ESC key
+        }
+        else if(c == 'r' || c == 'R'){
+            // teta_ang = 0;
             // reset -> center position
             accPosVector.clear();
             X_accum = Y_accum = 0;
